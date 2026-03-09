@@ -332,45 +332,109 @@ roi_connectivity_statistics
 % for each subject and each hemisphere, correlate each ROI time series with the rest of the brain and save the
 % output
 path_for_corrmaps = './corrmaps/';
-percentile_thresh = 95;
-for si = 1:numel(subjects)
-    sdata = subjectdata{si};
-    subject = subjects{si};
-
-    for hi = 1:2
-        hemi = hemis{hi};
-        braints = sdata.rsdata.(hemi);
-
-        % correlate roi time series with the rest of the brain
-        for ri = 1:4
-            roi = rois(ri);
-            
+writemaps = 0;
+percentile_thresh = [90 95];
+thresh_struct = struct;
+roi_overlap = struct;
+%prepopulate threshold map cell
+for percent_thresh = percentile_thresh;
+    for ii = 1:numel(threshold_map_cell)
+        threshold_map_cell{ii} = nan(198812,numel(subjectdata));
+    end
+    
+    for si = 1:numel(subjects)
+        sdata = subjectdata{si};
+        subject = subjects{si};
+    
+        for hi = 1:2
+            hemi = hemis{hi};
+            braints = sdata.rsdata.(hemi);
+    
+            % correlate roi time series with the rest of the brain
+            for ri = 1:4
+                roi = rois(ri);
+                
+                for ti = 1:2
+                    task = tasks{ti};
+                    if ~isnan(sdata.(task).(['roi_' num2str(roi)]).(hemi).idx)
+                        roits = sdata.(task).(['roi_' num2str(roi)]).(hemi).com_rs_ts;
+                        
+                        nodeidx = braints(:,1);
+                    % Perform correlation between ROI time series and brain data
+        
+                        corr_results = corr(roits', braints(:,2:end)', 'Rows', 'complete');
+                        % replace nan with 0
+                        corr_results(isnan(corr_results)) = 0;  % Replace NaNs with 0
+                        disp([subject '.' task '.roi_' num2str(roi) '.' hemi ' correlated'])
+        
+                        % create thresholded version of corr_result that keeps only
+                        % values greater than percentile treshold
+                        % Apply threshold to correlation results
+        
+                        thresholded_corr = corr_results > prctile(corr_results, percent_thresh);
+                        % store thresholded_corr in a cell array
+                        % task)
+                        threshold_map_cell{ri,hi,ti}(:,si) = thresholded_corr;
+        
+                        if writemaps == 1
+                            % save as brain data out as a matrix
+                            writematrix([nodeidx corr_results'],[path_for_corrmaps '/' task '/' subject '.' task '.roi_' num2str(roi) '.' hemi '.1D.dset'],'FileType','text')
+                            writematrix([nodeidx thresholded_corr'],[path_for_corrmaps '/' task '/' subject '.' task '.roi_' num2str(roi) '.' num2str(percentile_thresh) 'percentile' hemi '.1D.dset'],'FileType','text')
+                        end
+                    else 
+                        disp([subject '.' task '.roi_' num2str(roi) '.' hemi ' is all nan. Skipping.'])
+                    end
+                end
+            end
+        end
+    end
+    
+    thresh_struct.(['thresh' num2str(percent_thresh)]) = threshold_map_cell;
+end
+%%
+% create probability overlap map for thresholded_map_cell entries
+for percent_thresh = percentile_thresh
+    for ii = 1:numel(threshold_map_cell)
+        thresh_struct.(['thresh' num2str(percent_thresh)]){ii} = mean(thresh_struct.(['thresh' num2str(percent_thresh)]){ii},2,'omitnan');
+    end
+end
+%% write out percentile for group
+for percent_thresh = percentile_thresh
+    for ri = 1:4
+        roi = rois(ri);
+        for hi = 1:2
+            hemi = hemis{hi};
             for ti = 1:2
                 task = tasks{ti};
 
-                roits = sdata.(task).(['roi_' num2str(roi)]).(hemi).com_rs_ts;
-            
-                nodeidx = braints(:,1);
-            % Perform correlation between ROI time series and brain data
-                corr_results = corr(roits', braints(:,2:end)', 'Rows', 'complete');
-                % replace nan with 0
-                corr_results(isnan(corr_results)) = 0;  % Replace NaNs with 0
-                disp([subject '.' task '.roi_' num2str(roi) '.' hemi ' correlated'])
+                % get overlap for each roi across participants
+                r_ovlp = [];
+                s = 0;
+                for si = 1:numel(subjects)
+                    sdata = subjectdata{si};
+                    subject = subjects{si};
+                    if ~isnan(sdata.(task).(['roi_' num2str(roi)]).(hemi).idx)
+                        s = s+1;
+                        r_ovlp = vertcat(r_ovlp,sdata.(task).(['roi_' num2str(roi)]).(hemi).idx);
+                    end
+                end
+                % get unique members of r_ovlp and their counts
+                r_prob_out = nan(198812,2);
+                [rindx] = unique(r_ovlp(:,1));
+                for ii = 1:198812
+                    r_prob_out(ii,1) = ii - 1;
+                    r_prob_out(ii,2) = sum( r_ovlp(:,1) == ii - 1 );
+                end
 
-                % create thresholded version of corr_result that keeps only
-                % values greater than percentile treshold
-                % Apply threshold to correlation results
 
-                thresholded_corr = corr_results > prctile(corr_results, percentile_thresh);
-            % save as brain data out as a matrix
-                writematrix([nodeidx corr_results'],[path_for_corrmaps '/' task '/' subject '.' task '.roi_' num2str(roi) '.' hemi '.1D.dset'],'FileType','text')
-                writematrix([nodeidx thresholded_corr'],[path_for_corrmaps '/' task '/' subject '.' task '.roi_' num2str(roi) '.' num2str(percentile_thresh) 'percentile' hemi '.1D.dset'],'FileType','text')
-                
+                outdata = thresh_struct.(['thresh' num2str(percent_thresh)]){ri, hi, ti};
+                writematrix([nodeidx outdata],[path_for_corrmaps '/' task '/_group_overlap.' task '.roi_' num2str(roi) '.' num2str(percent_thresh) 'percentile.' hemi '.1D.dset'],'FileType','text')
+
+                writematrix(r_prob_out,[path_for_corrmaps '/' task '/roi_' num2str(roi) '.group_probability.' hemi '.1D.dset'],'FileType','text');
             end
         end
     end
 end
-
 
 
 
