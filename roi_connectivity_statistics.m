@@ -1,4 +1,7 @@
 %% roi_connectivity_statistics
+if exist('idx_type_label','var')
+    fprintf('\n========== Statistics: %s ==========\n', idx_type_label);
+end
 
 %%
 %% STATISTICAL ANALYSIS: LME on ROI Connectivity
@@ -289,6 +292,8 @@ end
     
 fprintf('Diff. Per v Mem:SPPA v PPMA — Per vs Mem:\tt(%d) = %.3f, p = %.3f, d = %.3f\n', ...
     stats.df, stats.tstat, p, d_si);
+diff_si = conn_diff(:,1)-conn_diff(:,2);
+d_si    = mean(diff_si, 'omitnan') / std(diff_si, 0, 'omitnan')
 conn_stats.ttest_diff_interaction = struct( ...
         'SupParRegion', 'Diff', 'task1', 'Per', 'task2', 'Mem', ...
         'tstat', stats.tstat, 'df', stats.df, 'p', p, 'cohens_d', d_si);

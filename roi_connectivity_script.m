@@ -108,6 +108,94 @@ for s = 1:length(subjects)  % Loop through each subject
     subjectdata{s} = sdata;
 end
 
+%% COMPUTE UNIQUE (NON-OVERLAPPING) ROI INDICES
+% For each paired ROI (same number, dynloc vs imagery), find vertex indices
+% unique to each task by removing vertices shared with the paired task's version.
+for s = 1:length(subjects)
+    sdata = subjectdata{s};
+    for h = 1:2
+        hemi = hemis{h};
+        for r = 1:length(rois)
+            roi_field = ['roi_' num2str(rois(r))];
+            dl_idx = sdata.dynloc.(roi_field).(hemi).idx;
+            im_idx = sdata.imagery.(roi_field).(hemi).idx;
+
+            if (isscalar(dl_idx) && isnan(dl_idx)) || (isscalar(im_idx) && isnan(im_idx))
+                sdata.dynloc.(roi_field).(hemi).idx_uniq = NaN;
+                sdata.imagery.(roi_field).(hemi).idx_uniq = NaN;
+            else
+                uniq_dl = setdiff(dl_idx(:,1), im_idx(:,1));
+                uniq_im = setdiff(im_idx(:,1), dl_idx(:,1));
+                sdata.dynloc.(roi_field).(hemi).idx_uniq  = dl_idx(ismember(dl_idx(:,1), uniq_dl), :);
+                sdata.imagery.(roi_field).(hemi).idx_uniq = im_idx(ismember(im_idx(:,1), uniq_im), :);
+                fprintf('subject %s hemi %s roi %d: dynloc %d uniq / %d total, imagery %d uniq / %d total\n', ...
+                    subjects{s}, hemi, rois(r), numel(uniq_dl), size(dl_idx,1), numel(uniq_im), size(im_idx,1));
+            end
+        end
+    end
+    subjectdata{s} = sdata;
+end
+
+%% PLOT VERTEX OVERLAP BETWEEN PAIRED ROIs
+% For each ROI number, compute the proportion of vertices shared between the
+% dynloc and imagery versions across subjects, and display as a bar plot.
+
+overlap_roi_names = {'OPA/LPMA', 'PPA/VPMA', 'MPA/MPMA', 'SupPar'};
+
+% overlap_prop: rois × hemispheres × subjects
+overlap_prop = nan(length(rois), 2, length(subjects));
+
+for s = 1:length(subjects)
+    sdata = subjectdata{s};
+    for h = 1:2
+        hemi = hemis{h};
+        for r = 1:length(rois)
+            roi_field = ['roi_' num2str(rois(r))];
+            dl_idx  = sdata.dynloc.(roi_field).(hemi).idx;
+            uniq_dl = sdata.dynloc.(roi_field).(hemi).idx_uniq;
+
+            if (isscalar(dl_idx) && isnan(dl_idx)) || (isscalar(uniq_dl) && isnan(uniq_dl))
+                overlap_prop(r, h, s) = NaN;
+            else
+                n_total = size(dl_idx, 1);
+                n_uniq  = size(uniq_dl, 1);
+                overlap_prop(r, h, s) = (n_total - n_uniq) / n_total;
+            end
+        end
+    end
+end
+
+% build a 3rd panel: average across hemispheres
+overlap_prop_avg = mean(overlap_prop, 2, 'omitnan');       % rois × 1 × subjects
+overlap_all      = cat(2, overlap_prop, overlap_prop_avg); % rois × 3 × subjects
+
+panel_labels = {'LH', 'RH', 'Average'};
+
+figure('position', [0 0 900 350])
+set(gcf, 'Name', 'Vertex overlap: dynloc vs imagery ROIs');
+for h_plot = 1:3
+    subplot(1, 3, h_plot)
+    hold on
+
+    panel_data = squeeze(overlap_all(:, h_plot, :));  % rois × subjects
+
+    bar(mean(panel_data, 2, 'omitnan'), 'barwidth', 0.75);
+    plot(panel_data, '-k', 'linewidth', 1)
+    plot(panel_data, 'ok', 'markerfacecolor', 'k', 'MarkerEdgeColor', 'none')
+
+    xticks(1:length(rois))
+    xticklabels(overlap_roi_names)
+    xtickangle(30)
+    xlim([0.5 length(rois)+0.5])
+    ylim([0 1])
+    yticks([0 0.5 1])
+    yticklabels({'0', '0.5', '1'})
+    ylabel('Proportion overlapping vertices')
+    title(panel_labels{h_plot})
+    box off
+end
+sgtitle('Vertex overlap between paired ROIs (dynloc vs imagery)')
+
 %% LOAD RESTING STATE fMRI DATA
 % This section loads preprocessed resting state (rs) functional MRI data for each subject
 % Resting state data shows brain activity when the subject is not performing a task
@@ -148,6 +236,20 @@ for s = 1:length(subjects)  % Loop through each subject
 end
 
 
+%% RUN ANALYSIS FOR OVERLAPPING AND UNIQUE VERTEX SETS
+% Runs time-series extraction, correlation, and statistics twice:
+%   'idx'      — original overlapping vertices (backwards-compatible)
+%   'idx_uniq' — vertices unique to each task's ROI (non-overlapping)
+for idx_type_cell = {'idx', 'idx_uniq'}
+    idx_type = idx_type_cell{1};
+    idx_type_label = idx_type;  % consumed by roi_connectivity_statistics and connectivity_figs
+    if strcmp(idx_type, 'idx')
+        ts_field = 'com_rs_ts';   % preserve original field name for backwards compatibility
+    else
+        ts_field = 'uniq_rs_ts';
+    end
+    fprintf('\n========== Running analysis: %s ==========\n', idx_type_label);
+
 %% EXTRACT ROI TIME SERIES FROM CENTER OF MASS ROIs
 % This section extracts the average time series from each COM ROI
 % A time series shows how activity in that brain region changes over time
@@ -171,15 +273,19 @@ for s = 1:length(subjects)  % Loop through each subject
                 task = tasks{rv};  % Get ROI version label
 
                 % Get the COM vertex indices for this ROI
-                current_roi_indices = sdata.(task).(['roi_' num2str(rois(r))]).(hemi).idx;
+                current_roi_indices = sdata.(task).(['roi_' num2str(rois(r))]).(hemi).(idx_type);
                 
                 % Extract the time series for this ROI
                 % This averages the activity across all vertices in the ROI at each time point
                 % The first output (~) is discarded, the second output is the time series
-                [~, roi_ts] = extract_roi_timeseries(sdata.rsdata.(hemi),current_roi_indices);
+                if isempty(current_roi_indices) || (isscalar(current_roi_indices) && isnan(current_roi_indices))
+                    roi_ts = nan(300,1);
+                else
+                    [~, roi_ts] = extract_roi_timeseries(sdata.rsdata.(hemi),current_roi_indices);
+                end
 
                 % Store the time series in the data structure
-                sdata.(task).(['roi_' num2str(rois(r))]).(hemi).com_rs_ts = roi_ts;
+                sdata.(task).(['roi_' num2str(rois(r))]).(hemi).(ts_field) = roi_ts;
 
 
                     rcount = rcount+1;  % Increment ROI counter
@@ -198,8 +304,18 @@ for s = 1:length(subjects)  % Loop through each subject
 
 end
 %% filter corrmat to remove any subjects with any nans in their matrix
+
+percep_mem_ts_matrix = percep_mem_ts_matrix(:,1:8,:,:);
 for s = 1:12
-    for h = 1:2
+
+    
+
+    for h = 1:2  % Loop through both hemispheres
+        hemi = hemis{h};  % Get current hemisphere label
+
+        % Find the directory containing this subject's preprocessed data
+        % The '*manual' wildcard matches a directory with 'manual' in the name
+        % dir() returns information about the matching directory
         if any(isnan(percep_mem_ts_matrix(:,:,h,s)),'all')
             disp(['NaN detected for : ' subjects{s} ' hemisphere ' hemis{h}]);
             percep_mem_ts_matrix(:,:,h,s) = nan(size(percep_mem_ts_matrix(:,:,h,s)));
@@ -208,12 +324,11 @@ for s = 1:12
 end
 %
 
-
 %% CALCULATE CORRELATIONS AMONG ROI TIME SERIES
 % This computes functional connectivity between all pairs of ROIs
 % Correlation measures how similarly two brain regions' activity patterns change over time
 % High correlation = strong functional connectivity = regions work together
-
+clear corrmat
 for s = 1:12  % Loop through all 12 subjects
     for h = 1:2  % Loop through both hemispheres
 
@@ -222,7 +337,7 @@ for s = 1:12  % Loop through all 12 subjects
         % Output: 8×8 correlation matrix
         % Each cell (i,j) shows how strongly ROI i correlates with ROI j
         % The diagonal will be 1.0 (each ROI perfectly correlates with itself)
-        corrmat(:,:,h,s) = corr(percep_mem_ts_matrix(:,:,h,s));
+        corrmat(:,:,h,s) = partialcorr(percep_mem_ts_matrix(:,:,h,s));
     end
 end
 
@@ -258,8 +373,10 @@ mean_corr_mat = squeeze(mean(corrmat,3,'omitnan'));
 sub_inds = [1 2 3; 5 6 7];
 
 % Create a new figure window
-figure()
-YLIM = [-0.5 1.5];
+figure('position',[0 0 800 600])
+set(gcf,'Name',['ROI Connectivity Bars [' idx_type_label ']']);
+YLIM = [-.9 .9];
+YLIM2 = [-.5 .5];
 % Loop through the two seed ROIs
 for r = 1:2
 
@@ -321,13 +438,35 @@ for r = 1:2
     xlim([.5 2.5])  % Add padding around the two bars
 
     % Match y-axis formatting to the other subplots
-    ylim(YLIM)
+    ylim(YLIM2)
     ylabel('Correlation (z)')
-    yticks(YLIM)
+    yticks(YLIM2)
 end
 
 %% run the stats
 roi_connectivity_statistics
+
+% save results indexed by vertex-overlap type
+if strcmp(idx_type, 'idx')
+    corrmat_overlap              = corrmat;
+    mean_corr_mat_overlap        = mean_corr_mat;
+    conn_stats_overlap           = conn_stats;
+    percep_mem_ts_matrix_overlap = percep_mem_ts_matrix;
+else
+    corrmat_uniq                 = corrmat;
+    mean_corr_mat_uniq           = mean_corr_mat;
+    conn_stats_uniq              = conn_stats;
+    percep_mem_ts_matrix_uniq    = percep_mem_ts_matrix;
+end
+
+end % end idx_type_cell loop
+
+% restore overlap variables as workspace defaults so downstream corrmap code is unaffected
+corrmat              = corrmat_overlap;
+mean_corr_mat        = mean_corr_mat_overlap;
+percep_mem_ts_matrix = percep_mem_ts_matrix_overlap;
+conn_stats           = conn_stats_overlap;
+
 %%
 % for each subject and each hemisphere, correlate each ROI time series with the rest of the brain and save the
 % output
@@ -429,7 +568,6 @@ for percent_thresh = percentile_thresh
 
                 outdata = thresh_struct.(['thresh' num2str(percent_thresh)]){ri, hi, ti};
                 writematrix([nodeidx outdata],[path_for_corrmaps '/' task '/_group_overlap.' task '.roi_' num2str(roi) '.' num2str(percent_thresh) 'percentile.' hemi '.1D.dset'],'FileType','text')
-
                 writematrix(r_prob_out,[path_for_corrmaps '/' task '/roi_' num2str(roi) '.group_probability.' hemi '.1D.dset'],'FileType','text');
             end
         end
